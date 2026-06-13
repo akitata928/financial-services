@@ -124,43 +124,77 @@ def fetch_csrf_token(s: requests.Session) -> Optional[str]:
     return None
 
 
-def fetch_js_endpoints(s: requests.Session) -> dict:
+def fetch_js_endpoints(s: requests.Session, verbose: bool = False) -> dict:
     """從 stockRefEtf/index.js 解析出實際 API 路徑"""
-    js_url = f"{BASE}/resources/js/front/stockRefEtf/index.js?rn=0126"
+    # 嘗試多個可能的 JS 路徑（rn= 版本號可能不同）
+    js_urls = [
+        f"{BASE}/resources/js/front/stockRefEtf/index.js?rn=0126",
+        f"{BASE}/resources/js/front/stockRefEtf/index.js",
+        f"{BASE}/resources/js/front/utils.js?rn=0126",
+    ]
     found = {}
-    try:
-        r = s.get(js_url, timeout=10)
-        if r.status_code != 200:
-            return found
-        js = r.text
-        # 找 url: '...' 或 url: "..." 或 "/etfmaster/..."
-        patterns = [
-            r"""url\s*:\s*['"]([^'"]+/api/[^'"]+)['"]""",
-            r"""['"](/etfmaster/[^'"]*api[^'"]+)['"]""",
-            r"""fetch\s*\(\s*['"]([^'"]+)['"]""",
-            r"""axios\.[a-z]+\s*\(\s*['"]([^'"]+)['"]""",
-        ]
-        urls_found = set()
-        for pat in patterns:
-            for m in re.finditer(pat, js):
-                u = m.group(1)
-                if "/etfmaster/" in u or u.startswith("/"):
-                    urls_found.add(u)
-        if urls_found:
-            log.info(f"  JS 解析到 {len(urls_found)} 個 URL：")
-            for u in sorted(urls_found):
-                log.info(f"    {u}")
-            # 嘗試分類
-            for u in urls_found:
-                if "stocksEtfShare" in u or "stockRef" in u.lower():
-                    found["stock_holdings"] = f"https://www.emega.com.tw{u}" if u.startswith("/") else u
-                elif "etfStocksWeight" in u or "etfWeight" in u.lower():
-                    found["etf_weight"] = f"https://www.emega.com.tw{u}" if u.startswith("/") else u
-                elif "etfList" in u.lower() or ("etf" in u.lower() and "list" in u.lower()):
-                    found["etf_list"] = f"https://www.emega.com.tw{u}" if u.startswith("/") else u
-    except Exception as e:
-        log.debug(f"  JS 解析失敗: {e}")
+    for js_url in js_urls:
+        try:
+            r = s.get(js_url, timeout=10)
+            if r.status_code != 200:
+                log.debug(f"  JS {js_url} → {r.status_code}")
+                continue
+            js = r.text
+            log.info(f"  JS 載入成功：{js_url}（{len(js)} 字元）")
+
+            # 廣義抓所有字串字面值，不限定 /etfmaster/
+            all_strings = set()
+            for m in re.finditer(r"""['"]([^'"]{4,120})['"]""", js):
+                v = m.group(1)
+                all_strings.add(v)
+
+            # 過濾看起來像路徑的
+            path_strings = [v for v in all_strings if (
+                ("/" in v and not v.startswith("http") and not ".css" in v and not ".js" in v and not ".png" in v)
+                or "api" in v.lower()
+                or ".do" in v
+            )]
+            if verbose or True:  # 永遠顯示，方便除錯
+                log.info(f"  找到 {len(path_strings)} 個路徑字串：")
+                for p in sorted(path_strings)[:40]:
+                    log.info(f"    {p}")
+
+            # 分類
+            for v in all_strings:
+                vl = v.lower()
+                if any(k in vl for k in ("stocksEtfShare", "stockrefetf", "stocketf", "refetf")):
+                    url = f"https://www.emega.com.tw{v}" if v.startswith("/") else (f"{BASE}/{v}" if not v.startswith("http") else v)
+                    found["stock_holdings"] = url
+                    log.info(f"  → stock_holdings: {url}")
+                elif any(k in vl for k in ("etfstocksweight", "etfweight", "holdingweight")):
+                    url = f"https://www.emega.com.tw{v}" if v.startswith("/") else (f"{BASE}/{v}" if not v.startswith("http") else v)
+                    found["etf_weight"] = url
+                    log.info(f"  → etf_weight: {url}")
+
+            if found:
+                break  # 找到就不繼續嘗試其他 JS 檔
+
+        except Exception as e:
+            log.debug(f"  JS 解析失敗 ({js_url}): {e}")
     return found
+
+
+def dump_js(s: requests.Session):
+    """直接印出 JS 原始內容，供手動找 API endpoint"""
+    js_url = f"{BASE}/resources/js/front/stockRefEtf/index.js?rn=0126"
+    try:
+        r = s.get(js_url, timeout=15)
+        print(f"Status: {r.status_code}, Size: {len(r.text)}")
+        if r.status_code == 200:
+            # 印出含有 api / .do / url 的行
+            for i, line in enumerate(r.text.splitlines(), 1):
+                ll = line.lower()
+                if any(k in ll for k in ("api", ".do", "url", "ajax", "fetch", "axios", "xhr")):
+                    print(f"L{i:4d}: {line.strip()[:120]}")
+        else:
+            print(r.text[:500])
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -699,10 +733,17 @@ def main():
     ap.add_argument("--etf-weight-all", action="store_true", help="批次抓全部 ETF 成分股")
     ap.add_argument("--delay",          type=float, default=0.4, help="請求間隔秒數（預設 0.4）")
     ap.add_argument("--check-cookie",   action="store_true", help="只檢查 cookie 是否有效")
+    ap.add_argument("--dump-js",        action="store_true", help="印出 JS 檔中的 API 相關行（除錯用）")
     args = ap.parse_args()
 
     s    = make_session()
     conn = get_conn()
+
+    # 印出 JS 原始內容（找 API endpoint）
+    if args.dump_js:
+        fetch_csrf_token(s)
+        dump_js(s)
+        return
 
     # 只檢查 cookie + CSRF
     if args.check_cookie:
