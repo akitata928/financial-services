@@ -179,20 +179,28 @@ def fetch_js_endpoints(s: requests.Session, verbose: bool = False) -> dict:
     return found
 
 
-def dump_js(s: requests.Session):
+def dump_js(s: requests.Session, context: int = 0):
     """直接印出 JS 原始內容，供手動找 API endpoint"""
     js_url = f"{BASE}/resources/js/front/stockRefEtf/index.js?rn=0126"
     try:
         r = s.get(js_url, timeout=15)
         print(f"Status: {r.status_code}, Size: {len(r.text)}")
-        if r.status_code == 200:
-            # 印出含有 api / .do / url 的行
-            for i, line in enumerate(r.text.splitlines(), 1):
-                ll = line.lower()
-                if any(k in ll for k in ("api", ".do", "url", "ajax", "fetch", "axios", "xhr")):
-                    print(f"L{i:4d}: {line.strip()[:120]}")
-        else:
+        if r.status_code != 200:
             print(r.text[:500])
+            return
+        lines = r.text.splitlines()
+        if context > 0:
+            # 印出每個 $.ajax({ 區塊往後 context 行（看 type / data / url）
+            for i, line in enumerate(lines, 1):
+                if "$.ajax" in line or "ajax(" in line:
+                    print(f"\n─── ajax block @ L{i} ───")
+                    for j in range(i - 1, min(i - 1 + context, len(lines))):
+                        print(f"L{j+1:4d}: {lines[j].strip()[:140]}")
+        else:
+            for i, line in enumerate(lines, 1):
+                ll = line.lower()
+                if any(k in ll for k in ("api", ".do", "url", "ajax", "fetch", "axios", "xhr", "type:", "method:", "data:", "stockcode", "etfcode")):
+                    print(f"L{i:4d}: {line.strip()[:140]}")
     except Exception as e:
         print(f"Error: {e}")
 
@@ -734,6 +742,7 @@ def main():
     ap.add_argument("--delay",          type=float, default=0.4, help="請求間隔秒數（預設 0.4）")
     ap.add_argument("--check-cookie",   action="store_true", help="只檢查 cookie 是否有效")
     ap.add_argument("--dump-js",        action="store_true", help="印出 JS 檔中的 API 相關行（除錯用）")
+    ap.add_argument("--context",        type=int, default=0, help="dump-js 時每個 ajax 區塊顯示的行數（建議 15）")
     args = ap.parse_args()
 
     s    = make_session()
@@ -742,7 +751,7 @@ def main():
     # 印出 JS 原始內容（找 API endpoint）
     if args.dump_js:
         fetch_csrf_token(s)
-        dump_js(s)
+        dump_js(s, context=args.context)
         return
 
     # 只檢查 cookie + CSRF
