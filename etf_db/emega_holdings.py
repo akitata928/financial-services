@@ -244,31 +244,49 @@ def fetch_stock_holdings(s: requests.Session, stock_codes: List[str]) -> List[di
     return data if isinstance(data, list) else []
 
 
+def _ensure_holdings_columns(conn: sqlite3.Connection):
+    """確保 stock_etf_holdings 有 ytd_return 欄位（舊 DB 自動補上）"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(stock_etf_holdings)").fetchall()}
+    if "ytd_return" not in cols:
+        conn.execute("ALTER TABLE stock_etf_holdings ADD COLUMN ytd_return REAL")
+        conn.commit()
+        log.info("  + 已新增 ytd_return 欄位")
+
+
 def upsert_stock_holdings(conn: sqlite3.Connection, stock_code: str, rows: List[dict]) -> int:
+    _ensure_holdings_columns(conn)
     today = date.today().isoformat()
+    # 動態 key：emega 回應把查詢股票代號嵌在 key 裡（pct_2330 / share_2330）
+    pct_key   = f"pct_{stock_code}"
+    share_key = f"share_{stock_code}"
     n = 0
     for raw in rows:
-        etf_code = _get(raw, "ETF代號", "etfId", "etfCode", "etf_code")
-        etf_name = _get(raw, "ETF名稱", "ETF持股", "etfName", "etf_name", default="")
-        weight   = _to_float(_get(raw, "總持股權重%", "總持股權重", "持股權重", "holdingWeight", "weight", "weightPct"))
-        shares   = _to_int(_get(raw, "總持有張數", "持有張數", "holdingShares", "shares"))
+        etf_code = _get(raw, "etfId", "ETF代號", "etfCode", "etf_code")
+        etf_name = _get(raw, "etfName", "ETF名稱", "etf_name", default="")
+        # 權重：優先用精確的 pct_<code>，否則 totalPct（含 %）
+        weight = _to_float(_get(raw, pct_key, "totalPct", "總持股權重%"))
+        # 張數：totalShare 或 share_<code>
+        shares = _to_float(_get(raw, "totalShare", share_key, "總持有張數"))
+        ytd    = _to_float(_get(raw, "ytdReward", "ytd_return"))
         if not etf_code:
-            # 有時只有 ETF 名稱含代號，嘗試從名稱抽取
             m = re.match(r"^(\d{4,6}[A-Z]?)", str(etf_name))
-            if m:
-                etf_code = m.group(1)
-            else:
+            etf_code = m.group(1) if m else None
+            if not etf_code:
                 continue
         etf_code = str(etf_code).strip()
+        # ETF 名稱清掉尾端重複的代號（"富邦科技  0052" → "富邦科技"）
+        clean_name = re.sub(r"\s+\d{4,6}[A-Z]?\s*$", "", str(etf_name)).strip()
         conn.execute("""
             INSERT INTO stock_etf_holdings
-                (stock_code, etf_code, etf_name, holding_weight_pct, holding_shares, snapshot_date)
-            VALUES (?,?,?,?,?,?)
+                (stock_code, etf_code, etf_name, holding_weight_pct, holding_shares, ytd_return, snapshot_date)
+            VALUES (?,?,?,?,?,?,?)
             ON CONFLICT(stock_code, etf_code, snapshot_date) DO UPDATE SET
                 etf_name           = excluded.etf_name,
                 holding_weight_pct = excluded.holding_weight_pct,
-                holding_shares     = excluded.holding_shares
-        """, (stock_code, etf_code, str(etf_name).strip(), weight, shares, today))
+                holding_shares     = excluded.holding_shares,
+                ytd_return         = excluded.ytd_return
+        """, (stock_code, etf_code, clean_name, weight,
+              int(shares) if shares is not None else None, ytd, today))
         n += 1
     conn.commit()
     return n
@@ -424,17 +442,18 @@ def main():
         n = upsert_stock_holdings(conn, args.holdings, rows)
         log.info(f"✅ {args.holdings} → {len(rows)} 筆原始，寫入 {n} 筆")
         cur = conn.execute("""
-            SELECT etf_code, etf_name, holding_weight_pct, holding_shares
+            SELECT etf_code, etf_name, holding_weight_pct, holding_shares, ytd_return
             FROM stock_etf_holdings WHERE stock_code=?
             ORDER BY holding_weight_pct DESC NULLS LAST LIMIT 40
         """, (args.holdings,))
-        print(f"\n{args.holdings} 被以下 ETF 持有：")
-        print(f"{'ETF代號':10}{'ETF名稱':24}{'權重%':>8}{'持有張數':>12}")
-        print("-" * 60)
+        print(f"\n{args.holdings} 被以下 ETF 持有（依權重排序）：")
+        print(f"{'ETF代號':<9}{'ETF名稱':<20}{'權重%':>9}{'持有張數':>13}{'YTD%':>9}")
+        print("-" * 64)
         for row in cur.fetchall():
-            w = f"{row['holding_weight_pct']:.3f}" if row['holding_weight_pct'] is not None else "—"
+            w  = f"{row['holding_weight_pct']:.3f}" if row['holding_weight_pct'] is not None else "—"
             sh = f"{row['holding_shares']:,}" if row['holding_shares'] is not None else "—"
-            print(f"{row['etf_code']:10}{(row['etf_name'] or ''):24}{w:>8}{sh:>12}")
+            yd = f"{row['ytd_return']:.2f}" if row['ytd_return'] is not None else "—"
+            print(f"{row['etf_code']:<9}{(row['etf_name'] or ''):<20}{w:>9}{sh:>13}{yd:>9}")
 
     if args.holdings_all:
         log.info("批次抓全部個股（Ctrl+C 可中斷，下次續傳）")
