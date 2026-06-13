@@ -36,7 +36,7 @@ import sqlite3
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 
 import requests
 from bs4 import BeautifulSoup
@@ -97,7 +97,7 @@ def make_session() -> requests.Session:
 # ─────────────────────────────────────────────
 # CSRF Token 自動取得
 # ─────────────────────────────────────────────
-def fetch_csrf_token(s: requests.Session) -> str | None:
+def fetch_csrf_token(s: requests.Session) -> Optional[str]:
     """
     從 emega 頁面的 <meta name="_csrf"> 自動取得 CSRF token，
     並設定到 session header X-XSRF-TOKEN。
@@ -334,7 +334,7 @@ def _map_etf_row(raw: dict) -> dict:
     return out
 
 
-def fetch_etf_list(s: requests.Session, endpoints: dict) -> list[dict]:
+def fetch_etf_list(s: requests.Session, endpoints: dict) -> List[dict]:
     url = endpoints.get("etf_list")
     if not url:
         log.warning("etf_list endpoint 未知，跳過")
@@ -350,7 +350,7 @@ def fetch_etf_list(s: requests.Session, endpoints: dict) -> list[dict]:
     return []
 
 
-def upsert_etf_profiles(conn: sqlite3.Connection, rows: list[dict]):
+def upsert_etf_profiles(conn: sqlite3.Connection, rows: List[dict]):
     today = date.today().isoformat()
     updated = 0
     for raw in rows:
@@ -426,7 +426,7 @@ def fetch_stock_holdings(
     s: requests.Session,
     endpoints: dict,
     stock_code: str,
-) -> list[dict]:
+) -> List[dict]:
     """抓取個股被哪些 ETF 持有"""
     template = endpoints.get("stock_holdings")
     if not template:
@@ -451,7 +451,7 @@ def fetch_stock_holdings(
 def upsert_stock_holdings(
     conn: sqlite3.Connection,
     stock_code: str,
-    rows: list[dict],
+    rows: List[dict],
 ):
     today = date.today().isoformat()
     inserted = 0
@@ -567,7 +567,7 @@ def fetch_etf_weight(
     s: requests.Session,
     endpoints: dict,
     etf_code: str,
-) -> list[dict]:
+) -> List[dict]:
     template = endpoints.get("etf_weight")
     if not template:
         log.warning("etf_weight endpoint 未知")
@@ -591,7 +591,7 @@ def fetch_etf_weight(
 def upsert_etf_holdings(
     conn: sqlite3.Connection,
     etf_code: str,
-    rows: list[dict],
+    rows: List[dict],
 ):
     today = date.today().isoformat()
     inserted = 0
