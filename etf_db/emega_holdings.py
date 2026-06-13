@@ -1,20 +1,30 @@
 """
-emega ETFMaster 持倉抓取器 — Cookie 注入版
+emega ETFMaster 持倉抓取器 — Cookie + CSRF Token 版
 
-一次性步驟（只需做一次）：
-  1. Chrome 開啟 https://www.emega.com.tw/etfmaster/index.do
-  2. 按 F12 → Network 分頁 → 重新整理頁面
-  3. 點任一個請求 → Headers → 找到 "Cookie:" 那一行
-  4. 複製整串 cookie 值（很長，從 JSESSIONID= 開始）
-  5. 存成檔案：echo '貼上cookie字串' > ~/.etf_session_cookie
+【重要】emega 使用 CSRF 保護，需要 cookie + X-XSRF-TOKEN 兩者才能呼叫 API。
+本腳本會自動從頁面抓取 CSRF token，你只需要提供 cookie。
 
-之後每次執行：
-  python etf_db/emega_holdings.py --discover           # 找到正確 API endpoint
+━━━ 一次性步驟：取得 Cookie ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Chrome 開啟：https://www.emega.com.tw/etfmaster/stockRefEtf/index.do
+2. 按 F12 → 上方點「Network（網路）」分頁
+3. 按 Command+R（或 F5）重新整理頁面
+4. 左側列表點「index.do」（最上面那筆）
+5. 右側點「Headers（標頭）」→ 往下捲到「Request Headers」
+6. 找到「cookie:」那行（全小寫），點右鍵 → Copy value
+   ※ 複製的是「:」後面的整串值，很長，包含 JSESSIONID= ...
+7. 在 Terminal 貼上：
+      echo '貼上整串cookie' > ~/.etf_session_cookie
+
+━━━ 之後每次執行 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  python etf_db/emega_holdings.py --check-cookie       # 驗證 cookie + CSRF 正常
+  python etf_db/emega_holdings.py --discover           # 找到正確 API endpoint（從 JS 解析）
   python etf_db/emega_holdings.py --etf-list           # 抓 ETF 清單（343 檔，補充欄位）
-  python etf_db/emega_holdings.py --holdings-all       # 抓全部持倉（559 股 × ~0.4s）
   python etf_db/emega_holdings.py --holdings 2330      # 抓單支股票的 ETF 持倉
+  python etf_db/emega_holdings.py --holdings-all       # 批次抓全部個股持倉（559 股）
   python etf_db/emega_holdings.py --etf-weight 0050    # 抓單一 ETF 的成分股權重
-  python etf_db/emega_holdings.py --etf-weight-all     # 抓全部 ETF 成分股（慢，數百檔）
+  python etf_db/emega_holdings.py --etf-weight-all     # 批次抓全部 ETF 成分股
 """
 
 import argparse
@@ -61,7 +71,7 @@ def make_session() -> requests.Session:
         ),
         "Accept": "application/json, text/html, */*",
         "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-        "Referer": f"{BASE}/index.do",
+        "Referer": f"{BASE}/stockRefEtf/index.do",
         "X-Requested-With": "XMLHttpRequest",
     })
 
@@ -76,12 +86,81 @@ def make_session() -> requests.Session:
         log.warning(
             f"⚠ 找不到 cookie 檔案 {COOKIE_PATH}\n"
             "  請依照以下步驟取得 cookie：\n"
-            "  1. Chrome 開啟 https://www.emega.com.tw/etfmaster/index.do\n"
-            "  2. F12 → Network → 重新整理\n"
+            "  1. Chrome 開啟 https://www.emega.com.tw/etfmaster/stockRefEtf/index.do\n"
+            "  2. F12 → Network 分頁 → Command+R 重新整理\n"
             "  3. 點任一請求 → Headers → 複製 Cookie: 的值\n"
             f"  4. echo '貼上cookie' > {COOKIE_PATH}"
         )
     return s
+
+
+# ─────────────────────────────────────────────
+# CSRF Token 自動取得
+# ─────────────────────────────────────────────
+def fetch_csrf_token(s: requests.Session) -> str | None:
+    """
+    從 emega 頁面的 <meta name="_csrf"> 自動取得 CSRF token，
+    並設定到 session header X-XSRF-TOKEN。
+    每次 session 建立後都要呼叫一次（token 會過期）。
+    """
+    for page in (
+        f"{BASE}/stockRefEtf/index.do",
+        f"{BASE}/index.do",
+    ):
+        try:
+            r = s.get(page, timeout=10)
+            if r.status_code != 200:
+                continue
+            soup = BeautifulSoup(r.text, "lxml")
+            meta = soup.find("meta", {"name": "_csrf"})
+            if meta and meta.get("content"):
+                token = meta["content"]
+                s.headers["X-XSRF-TOKEN"] = token
+                log.info(f"✓ CSRF token 取得成功（{token[:20]}...）")
+                return token
+        except Exception as e:
+            log.debug(f"  CSRF 取得失敗 ({page}): {e}")
+    log.warning("⚠ 無法取得 CSRF token，API 呼叫可能會失敗")
+    return None
+
+
+def fetch_js_endpoints(s: requests.Session) -> dict:
+    """從 stockRefEtf/index.js 解析出實際 API 路徑"""
+    js_url = f"{BASE}/resources/js/front/stockRefEtf/index.js?rn=0126"
+    found = {}
+    try:
+        r = s.get(js_url, timeout=10)
+        if r.status_code != 200:
+            return found
+        js = r.text
+        # 找 url: '...' 或 url: "..." 或 "/etfmaster/..."
+        patterns = [
+            r"""url\s*:\s*['"]([^'"]+/api/[^'"]+)['"]""",
+            r"""['"](/etfmaster/[^'"]*api[^'"]+)['"]""",
+            r"""fetch\s*\(\s*['"]([^'"]+)['"]""",
+            r"""axios\.[a-z]+\s*\(\s*['"]([^'"]+)['"]""",
+        ]
+        urls_found = set()
+        for pat in patterns:
+            for m in re.finditer(pat, js):
+                u = m.group(1)
+                if "/etfmaster/" in u or u.startswith("/"):
+                    urls_found.add(u)
+        if urls_found:
+            log.info(f"  JS 解析到 {len(urls_found)} 個 URL：")
+            for u in sorted(urls_found):
+                log.info(f"    {u}")
+            # 嘗試分類
+            for u in urls_found:
+                if "stocksEtfShare" in u or "stockRef" in u.lower():
+                    found["stock_holdings"] = f"https://www.emega.com.tw{u}" if u.startswith("/") else u
+                elif "etfStocksWeight" in u or "etfWeight" in u.lower():
+                    found["etf_weight"] = f"https://www.emega.com.tw{u}" if u.startswith("/") else u
+                elif "etfList" in u.lower() or ("etf" in u.lower() and "list" in u.lower()):
+                    found["etf_list"] = f"https://www.emega.com.tw{u}" if u.startswith("/") else u
+    except Exception as e:
+        log.debug(f"  JS 解析失敗: {e}")
+    return found
 
 
 # ─────────────────────────────────────────────
@@ -625,21 +704,40 @@ def main():
     s    = make_session()
     conn = get_conn()
 
-    # 只檢查 cookie
+    # 只檢查 cookie + CSRF
     if args.check_cookie:
-        log.info("測試 cookie 有效性...")
+        log.info("測試 cookie + CSRF token...")
         try:
-            r = s.get(f"{BASE}/index.do", timeout=10)
-            if r.status_code == 200 and "etf" in r.text.lower():
-                log.info("✅ cookie 有效，頁面正常載入")
+            r = s.get(f"{BASE}/stockRefEtf/index.do", timeout=10)
+            if r.status_code == 200 and "ETF" in r.text:
+                log.info(f"✅ 頁面正常載入（{len(r.text)} 字元）")
+                soup = BeautifulSoup(r.text, "lxml")
+                meta = soup.find("meta", {"name": "_csrf"})
+                if meta and meta.get("content"):
+                    log.info(f"✅ CSRF token 存在：{meta['content'][:30]}...")
+                else:
+                    log.warning("⚠ 頁面中找不到 CSRF token（可能 cookie 已過期）")
             else:
-                log.warning(f"⚠ 頁面回應異常（status {r.status_code}），可能 cookie 已過期")
+                log.warning(f"⚠ 頁面回應異常（status {r.status_code}），cookie 可能已過期")
+                log.warning("  請重新從 Chrome F12 複製最新的 cookie")
         except Exception as e:
             log.error(f"✗ 連線失敗: {e}")
         return
 
+    # 自動取得 CSRF token（必須在任何 API 呼叫前執行）
+    fetch_csrf_token(s)
+
+    # 先嘗試從 JS 解析 endpoint
+    js_eps = fetch_js_endpoints(s)
+    if js_eps:
+        log.info(f"  從 JS 解析到 {len(js_eps)} 個 endpoint")
+
     # 探索 endpoints
     eps = discover_endpoints(s, force=args.force)
+    # 合併 JS 解析結果（優先用 JS 找到的）
+    for k, v in js_eps.items():
+        if k not in eps:
+            eps[k] = v
 
     if not eps and not (args.discover):
         log.error("無法找到任何 endpoint，請確認 cookie 是否有效")
