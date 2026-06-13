@@ -207,15 +207,35 @@ def fetch_stock_list(s: requests.Session) -> List[dict]:
     return data if isinstance(data, list) else []
 
 
+def _extract_code_name(raw):
+    """從一筆股票資料抽取 (代號, 名稱)，支援 dict 或 list 格式"""
+    if isinstance(raw, dict):
+        code = _get(raw, "股票代號", "stockId", "stockCode", "code", "id", "value")
+        name = _get(raw, "股票名稱", "stockName", "name", "label", "text", default="")
+        return code, name
+    if isinstance(raw, (list, tuple)) and raw:
+        # 常見格式 [代號, 名稱] 或 [代號, 名稱, ...]
+        code = raw[0]
+        name = raw[1] if len(raw) > 1 else ""
+        return code, name
+    if isinstance(raw, str):
+        # 可能是 "2330 台積電" 或 "2330,台積電"
+        parts = re.split(r"[\s,]+", raw.strip(), maxsplit=1)
+        return (parts[0], parts[1] if len(parts) > 1 else "")
+    return None, None
+
+
 def upsert_stock_master(conn: sqlite3.Connection, rows: List[dict]) -> int:
     today = date.today().isoformat()
     n = 0
     for raw in rows:
-        code = _get(raw, "股票代號", "stockId", "stockCode", "code", "id")
-        name = _get(raw, "股票名稱", "stockName", "name", default="")
+        code, name = _extract_code_name(raw)
         if not code:
             continue
         code = str(code).strip()
+        # 過濾非股票代號（保留 4-6 位數字開頭）
+        if not re.match(r"^\d{4,6}", code):
+            continue
         conn.execute("""
             INSERT INTO stock_master (stock_code, stock_name, updated_at)
             VALUES (?,?,?)
@@ -430,7 +450,9 @@ def main():
         rows = fetch_stock_list(s)
         log.info(f"  取得 {len(rows)} 筆")
         if rows:
-            log.info(f"  範例 keys: {list(rows[0].keys())}")
+            first = rows[0]
+            log.info(f"  第一筆型別: {type(first).__name__}")
+            log.info(f"  第一筆內容: {json.dumps(first, ensure_ascii=False)[:200]}")
             n = upsert_stock_master(conn, rows)
             log.info(f"✅ 寫入 stock_master: {n} 筆")
 
