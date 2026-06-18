@@ -136,6 +136,10 @@ def fetch_isin_etfs(session: requests.Session) -> list[dict]:
         code = parts[0].strip()
         en_name = parts[1].strip() if len(parts) > 1 else ""
 
+        # 官方編碼原則：台灣 ETF 代號一律以「00」開頭
+        if not code.startswith("00") or len(code) > 7:
+            continue
+
         # 推斷分類
         cfi6 = cfi[:6]
         category = CFI_CATEGORY.get(cfi6, "ETF")
@@ -382,7 +386,7 @@ def main():
     parser.add_argument("--delay", type=float, default=0.4, help="行情請求間隔秒數 (default: 0.4)")
     parser.add_argument("--db", help="DB 路徑（覆蓋預設）")
     parser.add_argument("--clean-stocks", action="store_true",
-                        help="清除 etf_profile 中代號不以 0 開頭的非 ETF 記錄（修復誤入的股票）")
+                        help="清除 etf_profile 中代號不以 00 開頭的非 ETF 記錄（修復誤入的股票）")
     args = parser.parse_args()
 
     if args.db:
