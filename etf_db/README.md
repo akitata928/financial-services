@@ -22,7 +22,16 @@ bash etf_db/setup_mac.sh
 ```bash
 source etf_db/.venv/bin/activate          # 每次開新 Terminal 先啟用
 
-python3 etf_db/etl.py --holdings-all      # 批次抓 559 支股票的 ETF 持倉
+# ETF 清單 + 行情（TWSE/TPEX 公開 API，不需 cookie）
+python3 etf_db/twse_loader.py             # 載入 ETF 基本資料（~607 檔）
+python3 etf_db/twse_loader.py --price     # 同時抓 TWSE 上市 ETF 逐檔行情（~3 分鐘）
+
+# 個股反查 ETF 持倉（需要 emega cookie，見下方說明）
+python3 etf_db/emega_holdings.py --check-cookie   # 驗證 cookie 是否有效
+python3 etf_db/emega_holdings.py --stock-list     # 更新 stock_master（559 支個股）
+python3 etf_db/emega_holdings.py --holdings-all   # 批次抓全部個股持倉（約 4 分鐘）
+
+# 查詢
 python3 etf_db/query.py stats             # 資料庫統計
 python3 etf_db/query.py stock 2330        # 台積電被哪些 ETF 持有
 python3 etf_db/query.py compare 0050 0056 00878
@@ -47,7 +56,7 @@ python3 etf_db/query.py export --etf 0050 --fmt xlsx
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd /path/to/financial-services && source etf_db/.venv/bin/activate && python3 etf_db/etl.py --etf && python3 etf_db/etl.py --holdings-all</string>
+    <string>cd /path/to/financial-services && source etf_db/.venv/bin/activate && python3 etf_db/twse_loader.py --price && python3 etf_db/emega_holdings.py --holdings-all</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer></dict>
@@ -63,18 +72,25 @@ launchctl load ~/Library/LaunchAgents/com.user.etf-update.plist
 
 記得把 `/path/to/financial-services` 改成實際路徑。
 
-## 若遇到 403（emega 擋爬蟲）
+## emega Cookie 設定（個股反查 ETF 用）
 
-emega 的 API 可能需要瀏覽器 session cookie：
+個股 → ETF 反查（`emega_holdings.py`）需要 emega.com.tw 的瀏覽器 session cookie。
+ETF 清單和行情（`twse_loader.py`）**不需要** cookie。
 
-1. 用 Chrome 開 https://www.emega.com.tw/etfmaster/index.do
-2. 按 F12 → Network 分頁 → 重新整理 → 點任一個 `api/` 請求
-3. 複製 Request Headers 裡的整串 `Cookie:` 值
-4. 存進 `~/.etf_session_cookie`：
+### 取得 cookie
+
+1. 用 Chrome 開 https://www.emega.com.tw/etfmaster/stockRefEtf/index.do
+2. 按 F12 → Network 分頁 → Command+R 重新整理
+3. 點 `index.do` 請求 → Headers → Request Headers → 複製整串 `cookie:` 值
+4. 用 heredoc 寫入（避免 shell 展開特殊字元）：
    ```bash
-   echo '貼上cookie字串' > ~/.etf_session_cookie
+   cat > ~/.etf_session_cookie << 'ENDCOOKIE'
+   貼上cookie字串（整行）
+   ENDCOOKIE
    ```
-5. 重新執行 `etl.py`，會自動讀取該 cookie
+5. 驗證：`python3 etf_db/emega_holdings.py --check-cookie`
+
+Cookie 大約一週過期，需重新取得。
 
 或改用 repo 根目錄的 `emega_selenium_scraper.py`（Selenium 自動開瀏覽器抓取）。
 
@@ -82,11 +98,13 @@ emega 的 API 可能需要瀏覽器 session cookie：
 
 ```
 etf_db/
-├── schema.sql     8 張資料表（ETF基本資料/行情/持倉/反查/歷史權重/NAV/知識塊）
-├── etl.py         抓取管線：--discover / --init / --holdings-all / --etf-weight-all
-├── query.py       查詢 CLI：etf / compare / stock / holdings / search / stats / export
-├── setup_mac.sh   Mac 一鍵安裝
-└── .venv/         虛擬環境（安裝後產生，不入版控）
+├── schema.sql          8 張資料表（ETF基本資料/行情/持倉/反查/歷史權重/NAV/知識塊）
+├── twse_loader.py      ETF 清單 + 行情（TWSE/TPEX 公開 API，不需 cookie）
+├── emega_holdings.py   個股反查 ETF 持倉（需 emega cookie）--probe/--stock-list/--holdings-all
+├── query.py            查詢 CLI：etf / compare / stock / holdings / search / stats / export
+├── etl.py              舊版整合管線（API 探索 / 結構化寫入，備用）
+├── setup_mac.sh        Mac 一鍵安裝
+└── .venv/              虛擬環境（安裝後產生，不入版控）
 ```
 
 ## 資料表

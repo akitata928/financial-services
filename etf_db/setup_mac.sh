@@ -38,21 +38,28 @@ echo "✓ 套件安裝完成"
 DB_PATH="${ETF_DB_PATH:-$HOME/Desktop/etf_master.db}"
 echo "✓ 資料庫位置: $DB_PATH"
 
-# 5. 偵測 emega API endpoint
+# 5. 初始化資料庫 + 抓 ETF 清單（TWSE/TPEX 公開 API，不需 cookie）
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo ""
-echo "→ [1/3] 偵測 emega API endpoint..."
-python3 "$SCRIPT_DIR/etl.py" --discover || true
+echo "→ [1/3] 初始化資料庫 + 抓取 ETF 清單（TWSE/TPEX）..."
+python3 "$SCRIPT_DIR/twse_loader.py"
 
-# 6. 初始化資料庫 + 抓 ETF 清單
+# 6. 顯示統計前提示 cookie 設定
 echo ""
-echo "→ [2/3] 初始化資料庫 + 抓取 ETF 清單..."
-python3 "$SCRIPT_DIR/etl.py" --init
+echo "→ [2/3] ETF 清單已入庫"
+echo "   若要抓取個股 → ETF 反查持倉，請先設定 emega cookie："
+echo "   cat > ~/.etf_session_cookie << 'ENDCOOKIE'"
+echo "   （貼上 Chrome F12 複製的整串 cookie 字串）"
+echo "   ENDCOOKIE"
+echo "   python3 etf_db/emega_holdings.py --check-cookie   # 驗證"
+echo "   python3 etf_db/emega_holdings.py --stock-list     # 更新個股主檔"
+echo "   python3 etf_db/emega_holdings.py --holdings-all   # 批次抓持倉（約 4 分鐘）"
 
 # 7. 顯示統計
 echo ""
 echo "→ [3/3] 資料庫統計："
 python3 "$SCRIPT_DIR/query.py" stats || true
+echo ""
 
 echo ""
 echo "======================================"
@@ -63,8 +70,12 @@ cat <<'USAGE'
   # 啟用虛擬環境（每次開新 Terminal 都要先跑這行）
   source etf_db/.venv/bin/activate
 
-  # 批次抓全部股票持倉（約 3 分鐘，含限速）
-  python3 etf_db/etl.py --holdings-all
+  # ETF 清單更新（TWSE/TPEX 公開 API）
+  python3 etf_db/twse_loader.py --price         # ETF 清單 + 最新行情
+
+  # 個股 → ETF 反查持倉（需要 emega cookie）
+  python3 etf_db/emega_holdings.py --check-cookie
+  python3 etf_db/emega_holdings.py --holdings-all   # 批次抓全部個股（約 4 分鐘）
 
   # 查詢範例
   python3 etf_db/query.py stock 2330            # 台積電被哪些 ETF 持有
@@ -73,7 +84,7 @@ cat <<'USAGE'
   python3 etf_db/query.py search 高股息
   python3 etf_db/query.py export --etf 0050 --fmt xlsx
 
-  # 每日更新（可加進 crontab / launchd）
-  python3 etf_db/etl.py --etf && python3 etf_db/etl.py --holdings-all
+  # 每日更新（可加進 launchd）
+  python3 etf_db/twse_loader.py --price && python3 etf_db/emega_holdings.py --holdings-all
 
 USAGE
