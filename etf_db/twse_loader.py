@@ -265,10 +265,8 @@ def fetch_tpex_etfs(session: requests.Session) -> tuple[list[dict], list[dict]]:
             continue
         code = str(row[0]).strip()
         name = str(row[1]).strip()
-        # Keep ETF codes: 4-6 chars starting with 0 or 006, exclude warrants (start 7)
-        if code.startswith("7") or len(code) > 6:
-            continue
-        if not (code.startswith("0") or code.startswith("6")):
+        # ETF 代號一律以 0 開頭（0050, 006208, 00679B…），排除權證(7)及非ETF代號
+        if not code.startswith("0") or len(code) > 7:
             continue
 
         close_str = str(row[2]).replace(",", "").strip() if len(row) > 2 else ""
@@ -373,11 +371,36 @@ def main():
     parser.add_argument("--price", action="store_true", help="同時抓每檔最新收盤價（較慢）")
     parser.add_argument("--delay", type=float, default=0.4, help="行情請求間隔秒數 (default: 0.4)")
     parser.add_argument("--db", help="DB 路徑（覆蓋預設）")
+    parser.add_argument("--clean-stocks", action="store_true",
+                        help="清除 etf_profile 中代號不以 0 開頭的非 ETF 記錄（修復誤入的股票）")
     args = parser.parse_args()
 
     if args.db:
         global DB_PATH
         DB_PATH = Path(args.db)
+
+    # ── 清除誤入的股票代號 ──────────────────────────────────────
+    if args.clean_stocks:
+        if not DB_PATH.exists():
+            print(f"找不到 DB：{DB_PATH}")
+            return
+        conn = get_conn()
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM etf_profile WHERE etf_code NOT LIKE '0%'"
+        )
+        n_bad = cur.fetchone()[0]
+        if n_bad == 0:
+            print("✅ etf_profile 中沒有非 ETF 代號，無需清理")
+        else:
+            print(f"→ 刪除 {n_bad} 筆非 ETF 代號（不以 0 開頭）...")
+            conn.execute("DELETE FROM etf_profile WHERE etf_code NOT LIKE '0%'")
+            # 同步清掉對應的行情快照
+            conn.execute("DELETE FROM etf_market_snapshot WHERE etf_code NOT LIKE '0%'")
+            conn.commit()
+            remaining = conn.execute("SELECT COUNT(*) FROM etf_profile").fetchone()[0]
+            print(f"✅ 清理完成，etf_profile 剩 {remaining} 筆（純 ETF）")
+        conn.close()
+        return
 
     print("=" * 55)
     print("  台股 ETF TWSE 公開資料載入器")
