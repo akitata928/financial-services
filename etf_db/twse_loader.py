@@ -8,8 +8,17 @@
   4. TPEX stk_wn1430_result.php  → TPEX 上櫃 ETF 代號、名稱、收盤價（含債券/商品 ETF）
 
 用法：
-  python etf_db/twse_loader.py           # 只載入 ETF 基本資料 + TPEX 行情
-  python etf_db/twse_loader.py --price   # 同時抓 TWSE 上市 ETF 逐檔行情（~3 分鐘）
+  python etf_db/twse_loader.py                # 只載入 ETF 基本資料 + TPEX 行情
+  python etf_db/twse_loader.py --price        # 同時抓 TWSE 上市 ETF 逐檔行情（~3 分鐘）
+  python etf_db/twse_loader.py --clean-stocks # 清除誤入的非 ETF 代號（不以 00 開頭）
+
+━━━ 證交所 ETF 證券代號編碼原則（官方）━━━━━━━━━━━━━━━━━━━━
+所有台灣 ETF 代號一律以「00」開頭（4~6 碼），尾碼字母標示類型：
+  (無)=一般股票型(外幣K)  L=槓桿(外幣M)  R=反向(外幣S)
+  B=債券(外幣C)  U=期貨/商品(外幣V)  A=主動股票  D=主動債券  T=股債平衡
+範例：0050 006208 00631L 00632R 00679B 00713 00878 00980A
+注意：6xxx 是普通股票、02xxxx 是 ETN，皆非 ETF。過濾務必用 "00" 而非 "0"。
+參考：https://www.twse.com.tw/downloads/zh/ETF/ETFcode.pdf
 """
 
 import argparse
@@ -265,8 +274,9 @@ def fetch_tpex_etfs(session: requests.Session) -> tuple[list[dict], list[dict]]:
             continue
         code = str(row[0]).strip()
         name = str(row[1]).strip()
-        # ETF 代號一律以 0 開頭（0050, 006208, 00679B…），排除權證(7)及非ETF代號
-        if not code.startswith("0") or len(code) > 7:
+        # 官方編碼原則：台灣 ETF 代號一律以「00」開頭（0050/006208/00631L/00679B/00980A…）
+        # 注意：6xxx=普通股票、02xxxx=ETN，皆非 ETF，必須用 "00" 而非 "0" 過濾
+        if not code.startswith("00") or len(code) > 7:
             continue
 
         close_str = str(row[2]).replace(",", "").strip() if len(row) > 2 else ""
@@ -386,16 +396,16 @@ def main():
             return
         conn = get_conn()
         cur = conn.execute(
-            "SELECT COUNT(*) FROM etf_profile WHERE etf_code NOT LIKE '0%'"
+            "SELECT COUNT(*) FROM etf_profile WHERE etf_code NOT LIKE '00%'"
         )
         n_bad = cur.fetchone()[0]
         if n_bad == 0:
             print("✅ etf_profile 中沒有非 ETF 代號，無需清理")
         else:
-            print(f"→ 刪除 {n_bad} 筆非 ETF 代號（不以 0 開頭）...")
-            conn.execute("DELETE FROM etf_profile WHERE etf_code NOT LIKE '0%'")
+            print(f"→ 刪除 {n_bad} 筆非 ETF 代號（官方規則：ETF 一律以 00 開頭）...")
+            conn.execute("DELETE FROM etf_profile WHERE etf_code NOT LIKE '00%'")
             # 同步清掉對應的行情快照
-            conn.execute("DELETE FROM etf_market_snapshot WHERE etf_code NOT LIKE '0%'")
+            conn.execute("DELETE FROM etf_market_snapshot WHERE etf_code NOT LIKE '00%'")
             conn.commit()
             remaining = conn.execute("SELECT COUNT(*) FROM etf_profile").fetchone()[0]
             print(f"✅ 清理完成，etf_profile 剩 {remaining} 筆（純 ETF）")
