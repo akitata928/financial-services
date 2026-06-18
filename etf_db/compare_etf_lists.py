@@ -24,6 +24,7 @@ from bs4 import BeautifulSoup
 try:
     import openpyxl
     from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.cell.cell import MergedCell
 except ImportError:
     print("請安裝：pip install openpyxl")
     raise
@@ -243,9 +244,17 @@ def _hdr(cell, bg="1F4E79"):
 
 
 def _auto_width(ws):
-    for col in ws.columns:
-        max_len = max((len(str(c.value or "")) for c in col), default=8)
-        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 42)
+    # 略過合併儲存格（MergedCell 沒有 column_letter），以真實儲存格算欄寬
+    widths: dict = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            n = len(str(cell.value or ""))
+            if n > widths.get(cell.column_letter, 0):
+                widths[cell.column_letter] = n
+    for col_letter, max_len in widths.items():
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 42)
 
 
 def write_xlsx(moneydj: list, db: list, path: Path):
