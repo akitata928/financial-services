@@ -4,12 +4,14 @@
 資料來源：
   1. isin.twse.com.tw            → TWSE 上市 ETF 代號、ISIN、掛牌日、CFI 分類
   2. TWSE TWT38U                 → 中文名稱
-  3. TWSE STOCK_DAY              → 最新收盤價、成交量（TWSE 上市 ETF）
+  3. TWSE OpenAPI STOCK_DAY_ALL  → 全市場最新收盤價（一次請求，免金鑰）
   4. TPEX stk_wn1430_result.php  → TPEX 上櫃 ETF 代號、名稱、收盤價（含債券/商品 ETF）
+  5. TWSE STOCK_DAY              → 逐檔月線（--price-slow 備援）
 
 用法：
   python etf_db/twse_loader.py                # 只載入 ETF 基本資料 + TPEX 行情
-  python etf_db/twse_loader.py --price        # 同時抓 TWSE 上市 ETF 逐檔行情（~3 分鐘）
+  python etf_db/twse_loader.py --price        # 同時抓 TWSE 上市 ETF 行情（OpenAPI，一次請求，數秒）
+  python etf_db/twse_loader.py --price-slow   # 舊版逐檔抓行情（~3 分鐘，OpenAPI 掛掉時備援）
   python etf_db/twse_loader.py --clean-stocks # 清除誤入的非 ETF 代號（不以 00 開頭）
 
 ━━━ 證交所 ETF 證券代號編碼原則（官方）━━━━━━━━━━━━━━━━━━━━
@@ -233,6 +235,56 @@ def fetch_latest_price(session: requests.Session, etf_code: str) -> Optional[dic
 
 
 # ---------------------------------------------------------------------------
+# Step 3 (fast): TWSE OpenAPI STOCK_DAY_ALL → 全市場收盤，一次請求
+# ---------------------------------------------------------------------------
+
+def fetch_all_market_prices(session: requests.Session) -> list[dict]:
+    """
+    從 TWSE OpenAPI 一次抓全市場最近交易日收盤行情，過濾出 ETF（00 開頭）。
+    來源：https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL
+          （官方 OpenAPI、免金鑰、CC-BY 開放資料，Swagger: https://openapi.twse.com.tw/）
+    比逐檔 STOCK_DAY 快 ~200 倍（1 請求 vs 每檔 1 請求）。
+    回傳 [{'etf_code', 'close', 'volume_k'}]；OpenAPI 只給最新交易日，不含日期欄。
+    """
+    log.info("Step 3: 抓取 TWSE OpenAPI 全市場收盤（STOCK_DAY_ALL）...")
+    url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+    try:
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+        rows = resp.json()
+    except Exception as exc:
+        log.warning(f"OpenAPI STOCK_DAY_ALL 失敗: {exc}（可改用 --price-slow 逐檔備援）")
+        return []
+
+    def _num(s):
+        s = str(s or "").replace(",", "").strip()
+        if s in ("", "--", "X", "N/A"):
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    snapshots = []
+    for r in rows:
+        code = str(r.get("Code", "")).strip()
+        # 官方編碼原則：ETF 一律以 00 開頭（6xxx=股票、02xxxx=ETN 皆排除）
+        if not code.startswith("00") or len(code) > 7:
+            continue
+        close = _num(r.get("ClosingPrice"))
+        vol = _num(r.get("TradeVolume"))
+        if close is None:
+            continue
+        snapshots.append({
+            "etf_code": code,
+            "close": close,
+            "volume_k": int(vol / 1000) if vol else None,
+        })
+    log.info(f"  → 全市場 {len(rows)} 檔，其中 ETF {len(snapshots)} 檔有收盤價")
+    return snapshots
+
+
+# ---------------------------------------------------------------------------
 # Step 3b: TPEX → OTC ETF list + prices (bond ETFs, commodity ETFs, etc.)
 # ---------------------------------------------------------------------------
 
@@ -382,8 +434,11 @@ def upsert_snapshots(conn: sqlite3.Connection, snapshots: list[dict], default_da
 
 def main():
     parser = argparse.ArgumentParser(description="從 TWSE 公開 API 載入台股 ETF 資料")
-    parser.add_argument("--price", action="store_true", help="同時抓每檔最新收盤價（較慢）")
-    parser.add_argument("--delay", type=float, default=0.4, help="行情請求間隔秒數 (default: 0.4)")
+    parser.add_argument("--price", action="store_true",
+                        help="抓 TWSE 上市 ETF 最新收盤價（OpenAPI 一次請求，數秒）")
+    parser.add_argument("--price-slow", action="store_true",
+                        help="逐檔抓行情（~3 分鐘，OpenAPI 失效時的備援）")
+    parser.add_argument("--delay", type=float, default=0.4, help="逐檔行情請求間隔秒數 (default: 0.4)")
     parser.add_argument("--db", help="DB 路徑（覆蓋預設）")
     parser.add_argument("--clean-stocks", action="store_true",
                         help="清除 etf_profile 中代號不以 00 開頭的非 ETF 記錄（修復誤入的股票）")
@@ -456,9 +511,18 @@ def main():
         n_tpex_snap = upsert_snapshots(conn, tpex_snapshots)
         print(f"✅ 寫入 etf_market_snapshot (TPEX): {n_tpex_snap} 筆")
 
-    # Step 4 (optional): TWSE per-ETF price
-    if args.price:
-        print(f"\n→ 開始抓行情（共 {len(etfs)} 檔，間隔 {args.delay}s）...")
+    # Step 4 (optional): TWSE 行情 — 預設走 OpenAPI 一次請求；--price-slow 逐檔備援
+    if args.price and not args.price_slow:
+        time.sleep(0.5)
+        all_snaps = fetch_all_market_prices(session)
+        if all_snaps:
+            n2 = upsert_snapshots(conn, all_snaps)
+            print(f"✅ 寫入 etf_market_snapshot (OpenAPI 全市場): {n2} 筆")
+        else:
+            print("⚠ OpenAPI 無資料，請改跑 --price-slow 逐檔備援")
+
+    if args.price_slow:
+        print(f"\n→ 開始逐檔抓行情（共 {len(etfs)} 檔，間隔 {args.delay}s）...")
         snapshots = []
         for i, e in enumerate(etfs):
             code = e["etf_code"]

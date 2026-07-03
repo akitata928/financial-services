@@ -23,8 +23,13 @@ bash etf_db/setup_mac.sh
 source etf_db/.venv/bin/activate          # 每次開新 Terminal 先啟用
 
 # ETF 清單 + 行情（TWSE/TPEX 公開 API，不需 cookie）
-python3 etf_db/twse_loader.py             # 載入 ETF 基本資料（~607 檔）
-python3 etf_db/twse_loader.py --price     # 同時抓 TWSE 上市 ETF 逐檔行情（~3 分鐘）
+python3 etf_db/twse_loader.py               # 載入 ETF 基本資料
+python3 etf_db/twse_loader.py --price       # 同時抓行情（OpenAPI 一次請求，數秒）
+python3 etf_db/twse_loader.py --price-slow  # 逐檔備援（~3 分鐘，OpenAPI 掛掉才用）
+
+# MoneyDJ 欄位補完（發行商/費用率/規模/受益人數/YTD，Playwright 真實瀏覽器）
+python3 etf_db/moneydj_playwright.py --dry-run   # 先確認欄位對應
+python3 etf_db/moneydj_playwright.py             # 寫入 DB
 
 # 個股反查 ETF 持倉（需要 emega cookie，見下方說明）
 python3 etf_db/emega_holdings.py --check-cookie   # 驗證 cookie 是否有效
